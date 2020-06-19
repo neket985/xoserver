@@ -3,7 +3,7 @@ package ru.simpleteam.xoserver.entitie
 import org.springframework.web.reactive.socket.WebSocketSession
 
 data class XOState(
-        val state: Array<Int?>,
+        val state: Array<Int>,
         val players: MutableSet<WebSocketSession>,
         var currentPlayer: String,
         var winner: String?
@@ -30,7 +30,7 @@ data class XOResponse(
 )
 
 data class XOStateData(
-        val state: List<Int?>,
+        val state: List<Int>,
         val players: List<String>,
         val currentPlayer: String,
         val winner: String?

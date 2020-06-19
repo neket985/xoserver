@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.JsonProcessingException
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
 import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
+import org.springframework.web.reactive.socket.CloseStatus
 import org.springframework.web.reactive.socket.WebSocketHandler
 import org.springframework.web.reactive.socket.WebSocketSession
 import reactor.core.publisher.Flux
@@ -24,6 +25,7 @@ class XOController : WebSocketHandler {
     private val logger = LoggerFactory.getLogger(WebSocketConfig::class.java)
 
     override fun handle(session: WebSocketSession): Mono<Void> {
+        println("connected")
         val params = session.handshakeInfo.uri.query.split("&").mapNotNull {
             val spl = it.split("=", limit = 2)
             if (spl.size != 2) null
@@ -47,7 +49,7 @@ class XOController : WebSocketHandler {
                 if (state.isReadyToStart()) {
                     if (state.isFinished()) return@map XOResponse("Игра окончена", state.toData(), playerId)
                     if (state.currentPlayer != playerId) return@map XOResponse("Ожидается ход другого игрока", state.toData(), playerId)
-                    if (state.state[request.num] != null) return@map XOResponse("Указанная клетка занята", state.toData(), playerId)
+                    if (state.state[request.num] != -1) return@map XOResponse("Указанная клетка занята", state.toData(), playerId)
 
                     val playerIndex = state.players.indexOfFirst { it.id == playerId }
                     if (playerIndex == -1) return@map XOResponse("\\(``)/ странная фигня, не знаю, как так вышло", state.toData(), playerId)
@@ -79,32 +81,35 @@ class XOController : WebSocketHandler {
                 }
     }
 
-    private fun Array<Int?>.checkWinner(): Int? =
+    private fun Array<Int>.checkWinner(): Int? =
             if (
-                    this[0] != null && this[0] == this[1] && this[0] == this[2] ||
-                    this[0] != null && this[0] == this[3] && this[0] == this[6] ||
-                    this[0] != null && this[0] == this[4] && this[0] == this[8]
+                    this[0] != -1 && this[0] == this[1] && this[0] == this[2] ||
+                    this[0] != -1 && this[0] == this[3] && this[0] == this[6] ||
+                    this[0] != -1 && this[0] == this[4] && this[0] == this[8]
             ) this[0]
             else if (
-                    this[2] != null && this[2] == this[5] && this[2] == this[8] ||
-                    this[2] != null && this[2] == this[4] && this[2] == this[6]
+                    this[2] != -1 && this[2] == this[5] && this[2] == this[8] ||
+                    this[2] != -1 && this[2] == this[4] && this[2] == this[6]
             ) this[2]
             else if (
-                    this[8] != null && this[8] == this[7] && this[8] == this[6]
+                    this[8] != -1 && this[8] == this[7] && this[8] == this[6]
             ) this[8]
             else if (
-                    this[4] != null && this[4] == this[1] && this[4] == this[7] ||
-                    this[4] != null && this[4] == this[3] && this[4] == this[5]
+                    this[4] != -1 && this[4] == this[1] && this[4] == this[7] ||
+                    this[4] != -1 && this[4] == this[3] && this[4] == this[5]
             ) this[4]
             else null
 
     private fun handleConnectPlayer(connId: String, session: WebSocketSession): XOState {
         val state = mainMap.getOrPut(connId) {
-            XOState(arrayOf(null, null, null, null, null, null, null, null, null), mutableSetOf(session), session.id, null)
+            XOState(arrayOf(-1, -1, -1, -1, -1, -1, -1, -1, -1), mutableSetOf(session), session.id, null)
         }
         if (!state.players.contains(session)) {
             synchronized(state) {
-                if (state.players.size >= 2) throw IllegalArgumentException("В текущем подключении уже присутствуют два игрока")
+                if (state.players.size >= 2) {
+                    session.send(Flux.just(session.textMessage(mapper.writeValueAsString(XOResponse("В текущем подключении уже присутствуют два игрока", null))))).subscribe()
+                    session.close(CloseStatus.BAD_DATA)
+                }
                 state.players.add(session)
             }
         }
