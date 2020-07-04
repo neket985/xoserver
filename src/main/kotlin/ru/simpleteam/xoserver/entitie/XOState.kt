@@ -23,19 +23,9 @@ data class XOState(
     )
 }
 
-data class XOResponse(
-        val error: String?,
-        val data: XOStateData?,
-        val sessionId: String? = null
-)
-
 data class XOStateData(
         val state: List<Int>,
         val players: List<String>,
         val currentPlayer: String,
         val winner: String?
-)
-
-data class XORequest(
-        val num: Int
 )

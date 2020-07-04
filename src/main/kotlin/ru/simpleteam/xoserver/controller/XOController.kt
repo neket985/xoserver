@@ -6,20 +6,18 @@ import org.slf4j.LoggerFactory
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.socket.CloseStatus
 import org.springframework.web.reactive.socket.WebSocketHandler
+import org.springframework.web.reactive.socket.WebSocketMessage
 import org.springframework.web.reactive.socket.WebSocketSession
 import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.kotlin.core.publisher.toFlux
 import ru.simpleteam.xoserver.config.WebSocketConfig
-import ru.simpleteam.xoserver.entitie.XORequest
-import ru.simpleteam.xoserver.entitie.XOResponse
-import ru.simpleteam.xoserver.entitie.XOState
+import ru.simpleteam.xoserver.entitie.*
 import java.util.concurrent.ConcurrentHashMap
 
 
 @Component
-class XOController : WebSocketHandler {
-    private val mapper = jacksonObjectMapper()
+class XOController : WebSocketHandler, CustomWSHandler(jacksonObjectMapper()) {
     private val mainMap = ConcurrentHashMap<String, XOState>() //todo delete
 
     private val logger = LoggerFactory.getLogger(WebSocketConfig::class.java)
@@ -37,28 +35,32 @@ class XOController : WebSocketHandler {
         val playerId = session.id
         val state = handleConnectPlayer(connId, session)
 
-        session.send(Flux.just(session.textMessage(mapper.writeValueAsString(state.toResponse())))).subscribe()
+        session.sendJson(state.toResponse())
 
         val msgs = session.receive().map { msg ->
             val request = try {
-                mapper.readValue(msg.payload.asInputStream(), XORequest::class.java)
+                msg.readXORequest()
             } catch (e: JsonProcessingException) {
                 return@map XOResponse(e.message, null)
             }
-            synchronized(state) {
-                if (state.isReadyToStart()) {
-                    if (state.isFinished()) return@map XOResponse("Игра окончена", state.toData(), playerId)
-                    if (state.currentPlayer != playerId) return@map XOResponse("Ожидается ход другого игрока", state.toData(), playerId)
-                    if (state.state[request.num] != -1) return@map XOResponse("Указанная клетка занята", state.toData(), playerId)
 
-                    val playerIndex = state.players.indexOfFirst { it.id == playerId }
-                    if (playerIndex == -1) return@map XOResponse("\\(``)/ странная фигня, не знаю, как так вышло", state.toData(), playerId)
-                    state.state[request.num] = playerIndex
-                    state.currentPlayer = state.players.elementAt((playerIndex + 1) % 2).id
-                    state.winner = state.state.checkWinner()?.let { state.players.elementAt(it).id }
+            when(request) {
+                is XOSetRequest -> synchronized(state) {
+                    if (state.isReadyToStart()) {
+                        if (state.isFinished()) return@map XOResponse("Игра окончена", state.toData(), playerId)
+                        if (state.currentPlayer != playerId) return@map XOResponse("Ожидается ход другого игрока", state.toData(), playerId)
+                        if (state.state[request.data.num] != -1) return@map XOResponse("Указанная клетка занята", state.toData(), playerId)
 
-                    state.toResponse()
-                } else return@map XOResponse("Ожидается подключение", state.toData(), playerId)
+                        val playerIndex = state.players.indexOfFirst { it.id == playerId }
+                        if (playerIndex == -1) return@map XOResponse("\\(``)/ странная фигня, не знаю, как так вышло", state.toData(), playerId)
+                        state.state[request.data.num] = playerIndex
+                        state.currentPlayer = state.players.elementAt((playerIndex + 1) % 2).id
+                        state.winner = state.state.checkWinner()?.let { state.players.elementAt(it).id }
+
+                        state.toResponse()
+                    } else return@map XOResponse("Ожидается подключение", state.toData(), playerId)
+                }
+                else -> return@map XOResponse("Неизвестная команда", state.toData(), playerId)
             }
         }.map {
             it.sessionId to mapper.writeValueAsString(it)
@@ -79,6 +81,14 @@ class XOController : WebSocketHandler {
                     logger.error("err", it)
                     it
                 }
+    }
+
+    private fun WebSocketMessage.readXORequest(): XORequest<*>{
+        val tree = this.readJsonTree()
+        if(tree.hasNonNull("command")){
+           val command = XOCommand.valueOf(tree["command"].asText()) ?: throw IllegalArgumentException("Command is invalid")
+            return this.readJson(command.clazz)
+        }else throw IllegalArgumentException("Command is missed")
     }
 
     private fun Array<Int>.checkWinner(): Int? =
