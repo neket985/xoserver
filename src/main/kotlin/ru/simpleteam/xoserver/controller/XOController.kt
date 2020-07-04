@@ -1,8 +1,9 @@
 package ru.simpleteam.xoserver.controller
 
 import com.fasterxml.jackson.core.JsonProcessingException
-import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import com.fasterxml.jackson.databind.ObjectMapper
 import org.slf4j.LoggerFactory
+import org.springframework.beans.factory.annotation.Qualifier
 import org.springframework.stereotype.Component
 import org.springframework.web.reactive.socket.CloseStatus
 import org.springframework.web.reactive.socket.WebSocketHandler
@@ -12,13 +13,22 @@ import reactor.core.publisher.Flux
 import reactor.core.publisher.Mono
 import reactor.kotlin.core.publisher.toFlux
 import ru.simpleteam.xoserver.config.WebSocketConfig
-import ru.simpleteam.xoserver.entitie.*
+import ru.simpleteam.xoserver.controller.WsUtils.readXORequest
+import ru.simpleteam.xoserver.controller.WsUtils.sendJson
+import ru.simpleteam.xoserver.entitie.XOResponse
+import ru.simpleteam.xoserver.entitie.XORestartRequest
+import ru.simpleteam.xoserver.entitie.XOSetRequest
+import ru.simpleteam.xoserver.entitie.XOState
+import ru.simpleteam.xoserver.service.PingUsersService
 import java.util.concurrent.ConcurrentHashMap
 
-
 @Component
-class XOController : WebSocketHandler, CustomWSHandler(jacksonObjectMapper()) {
-    private val mainMap = ConcurrentHashMap<String, XOState>() //todo delete
+class XOController(
+        private val pingService: PingUsersService,
+        @Qualifier("usersMap")
+        private val mainMap: ConcurrentHashMap<String, XOState>,
+        private val mapper: ObjectMapper
+) : WebSocketHandler {
 
     private val logger = LoggerFactory.getLogger(WebSocketConfig::class.java)
 
@@ -35,36 +45,42 @@ class XOController : WebSocketHandler, CustomWSHandler(jacksonObjectMapper()) {
         val playerId = session.id
         val state = handleConnectPlayer(connId, session)
 
-        session.sendJson(state.toResponse())
+        state.players.toFlux().flatMap {
+            it.sendJson(state.toResponse())
+        }.subscribe()
 
         val msgs = session.receive().map { msg ->
-            val request = try {
-                msg.readXORequest()
-            } catch (e: JsonProcessingException) {
-                return@map XOResponse(e.message, null)
-            }
-
-            when(request) {
-                is XOSetRequest -> synchronized(state) {
-                    if (state.isReadyToStart()) {
-                        if (state.isFinished()) return@map XOResponse("Игра окончена", state.toData(), playerId)
-                        if (state.currentPlayer != playerId) return@map XOResponse("Ожидается ход другого игрока", state.toData(), playerId)
-                        if (state.state[request.data.num] != -1) return@map XOResponse("Указанная клетка занята", state.toData(), playerId)
-
-                        val playerIndex = state.players.indexOfFirst { it.id == playerId }
-                        if (playerIndex == -1) return@map XOResponse("\\(``)/ странная фигня, не знаю, как так вышло", state.toData(), playerId)
-                        state.state[request.data.num] = playerIndex
-                        state.currentPlayer = state.players.elementAt((playerIndex + 1) % 2).id
-                        state.winner = state.state.checkWinner()?.let { state.players.elementAt(it).id }
-
-                        state.toResponse()
-                    } else return@map XOResponse("Ожидается подключение", state.toData(), playerId)
+            when (msg.type) {
+                WebSocketMessage.Type.PONG -> {
+                    pingService.handlePong(session)
+                    XOResponse.empty
                 }
-                else -> return@map XOResponse("Неизвестная команда", state.toData(), playerId)
+                WebSocketMessage.Type.BINARY, WebSocketMessage.Type.TEXT -> {
+                    val request = try {
+                        msg.readXORequest()
+                    } catch (e: JsonProcessingException) {
+                        logger.error("", e)
+                        return@map XOResponse.jsonError(null)
+                    } catch (e: IllegalArgumentException) {
+                        logger.error("", e)
+                        return@map XOResponse.jsonError(null)
+                    }
+
+                    when (request) {
+                        is XOSetRequest -> synchronized(state) {
+                            state.game(request.num, playerId)
+                        }
+                        is XORestartRequest -> synchronized(state) {
+                            state.reset(playerId)
+                        }
+                        else -> XOResponse.clientError("Неизвестная команда", state.toData(), playerId)
+                    }
+                }
+                else -> XOResponse.empty
             }
-        }.map {
-            it.sessionId to mapper.writeValueAsString(it)
-        }
+        }.filter { it != XOResponse.empty }.map {
+            it!!.sessionId to mapper.writeValueAsString(it)
+        } //todo попробовать без return чисто на sendJson
 
         return msgs.flatMap { (key, fl) ->
             val msg = Flux.just(fl)
@@ -81,43 +97,16 @@ class XOController : WebSocketHandler, CustomWSHandler(jacksonObjectMapper()) {
                     logger.error("err", it)
                     it
                 }
+
     }
-
-    private fun WebSocketMessage.readXORequest(): XORequest<*>{
-        val tree = this.readJsonTree()
-        if(tree.hasNonNull("command")){
-           val command = XOCommand.valueOf(tree["command"].asText()) ?: throw IllegalArgumentException("Command is invalid")
-            return this.readJson(command.clazz)
-        }else throw IllegalArgumentException("Command is missed")
-    }
-
-    private fun Array<Int>.checkWinner(): Int? =
-            if (
-                    this[0] != -1 && this[0] == this[1] && this[0] == this[2] ||
-                    this[0] != -1 && this[0] == this[3] && this[0] == this[6] ||
-                    this[0] != -1 && this[0] == this[4] && this[0] == this[8]
-            ) this[0]
-            else if (
-                    this[2] != -1 && this[2] == this[5] && this[2] == this[8] ||
-                    this[2] != -1 && this[2] == this[4] && this[2] == this[6]
-            ) this[2]
-            else if (
-                    this[8] != -1 && this[8] == this[7] && this[8] == this[6]
-            ) this[8]
-            else if (
-                    this[4] != -1 && this[4] == this[1] && this[4] == this[7] ||
-                    this[4] != -1 && this[4] == this[3] && this[4] == this[5]
-            ) this[4]
-            else null
-
     private fun handleConnectPlayer(connId: String, session: WebSocketSession): XOState {
         val state = mainMap.getOrPut(connId) {
-            XOState(arrayOf(-1, -1, -1, -1, -1, -1, -1, -1, -1), mutableSetOf(session), session.id, null)
+            XOState(XOState.initState(), mutableSetOf(session), session.id, null, mutableListOf(0, 0))
         }
         if (!state.players.contains(session)) {
             synchronized(state) {
                 if (state.players.size >= 2) {
-                    session.send(Flux.just(session.textMessage(mapper.writeValueAsString(XOResponse("В текущем подключении уже присутствуют два игрока", null))))).subscribe()
+                    session.send(Flux.just(session.textMessage(mapper.writeValueAsString(XOResponse.lobbyFull())))).subscribe()
                     session.close(CloseStatus.BAD_DATA)
                 }
                 state.players.add(session)

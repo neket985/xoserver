@@ -2,24 +2,22 @@ package ru.simpleteam.xoserver.entitie
 
 
 data class XOSetRequest(
-        override val command: XOCommand<XOSetRequestData>,
-        override val data: XOSetRequestData
-): XORequest<XOSetRequest.XOSetRequestData>{
-    data class XOSetRequestData(
-            val num: Int
-    )
-}
+        val num: Int
+): XORequest
 
-interface XORequest <T>{
-    val command: XOCommand<T>
-    val data: T
-}
+class XORestartRequest: XORequest
 
-class XOCommand<T>(val clazz: Class<out XORequest<T>>){
+interface XORequest
+
+class XOCommand(val clazz: Class<out XORequest>){
     companion object{
         val SET = XOCommand(XOSetRequest::class.java)
+        val RESTART = XOCommand(XORestartRequest::class.java)
 
-        val values = mapOf("set" to SET)
+        val values = mapOf(
+                "set" to SET,
+                "restart" to RESTART
+        )
         fun valueOf(command: String) = values[command.toLowerCase()]
     }
 }

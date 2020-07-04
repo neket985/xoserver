@@ -7,6 +7,8 @@ import org.springframework.web.reactive.HandlerMapping
 import org.springframework.web.reactive.handler.SimpleUrlHandlerMapping
 import org.springframework.web.reactive.socket.server.support.WebSocketHandlerAdapter
 import ru.simpleteam.xoserver.controller.XOController
+import ru.simpleteam.xoserver.entitie.XOState
+import java.util.concurrent.ConcurrentHashMap
 
 
 @Configuration
@@ -23,4 +25,7 @@ class WebSocketConfig {
     fun wsHandlerAdapter(): HandlerAdapter? {
         return WebSocketHandlerAdapter()
     }
+
+    @Bean("usersMap")
+    fun getUsersMap() = ConcurrentHashMap<String, XOState>()
 }
